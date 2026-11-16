@@ -3,17 +3,21 @@
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
 import { CalendarClock, LogOut, Plus } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useAuth } from "@/components/auth/auth-context";
 import { AccountStep, type AccountMode } from "@/components/booking/account-step";
 import type { ConfirmedBooking } from "@/components/booking/checkout-step";
+import { bookingsFor, subscribe } from "@/lib/local/store";
+
+// A string snapshot keeps useSyncExternalStore stable between renders.
+const bookingsJson = (userId: string) => JSON.stringify(bookingsFor(userId));
 import { CtaLink } from "@/components/site/cta";
 import { DAY_END, DAY_START, formatDay, formatRange, todayIST } from "@/lib/booking/dates";
 import { inr } from "@/lib/booking/pricing";
 import { spring } from "@/lib/springs";
 import { cn } from "@/lib/utils";
 
-type Booking = ConfirmedBooking & { createdAt: string };
+type Booking = ConfirmedBooking;
 
 function when(b: Booking) {
   const s = b.schedule;
@@ -25,23 +29,14 @@ function when(b: Booking) {
 export function AccountView() {
   const { user, loading, logout } = useAuth();
   const [mode, setMode] = useState<AccountMode>("login");
-  const [loaded, setLoaded] = useState<{ userId: string; list: Booking[] } | null>(null);
-  const [tick, setTick] = useState(0);
-  const load = useCallback(() => setTick((t) => t + 1), []);
-
-  useEffect(() => {
-    if (!user) return;
-    let alive = true;
-    fetch("/api/bookings", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : { bookings: [] }))
-      .then((data) => alive && setLoaded({ userId: user.id, list: data.bookings ?? [] }))
-      .catch(() => alive && setLoaded({ userId: user.id, list: [] }));
-    return () => {
-      alive = false;
-    };
-  }, [user, tick]);
-
-  const bookings = user && loaded?.userId === user.id ? loaded.list : null;
+  const userId = user?.id ?? "";
+  const bookings = useSyncExternalStore(
+    subscribe,
+    () => (userId ? bookingsJson(userId) : "[]"),
+    () => "null"
+  );
+  const list = JSON.parse(bookings) as Booking[] | null;
+  const load = () => {};
 
   if (loading) {
     return <div className="mx-auto mt-16 h-40 max-w-md animate-pulse rounded-3xl bg-mint" aria-busy="true" />;
@@ -56,8 +51,8 @@ export function AccountView() {
   }
 
   const today = todayIST();
-  const upcoming = (bookings ?? []).filter((b) => b.schedule.date >= today || b.schedule.unit === "month");
-  const past = (bookings ?? []).filter((b) => !upcoming.includes(b));
+  const upcoming = (list ?? []).filter((b) => b.schedule.date >= today || b.schedule.unit === "month");
+  const past = (list ?? []).filter((b) => !upcoming.includes(b));
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
@@ -83,7 +78,7 @@ export function AccountView() {
         </div>
       </div>
 
-      <List title="Upcoming" items={bookings === null ? null : upcoming} empty="Nothing booked yet. Pick a desk and it'll show up here." />
+      <List title="Upcoming" items={list === null ? null : upcoming} empty="Nothing booked yet. Pick a desk and it'll show up here." />
       {past.length > 0 && <List title="Past" items={past} muted />}
     </div>
   );

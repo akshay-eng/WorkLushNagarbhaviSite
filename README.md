@@ -10,21 +10,39 @@ Worklush coworking floor in Nagarbhavi, Bengaluru. It replaces the WordPress
   government ID and Razorpay.
 - **My bookings** (`/account`).
 
+Live preview: **https://worklushconcepts.pulplabs.ai** (GitHub Pages).
+
+## This is the front-end preview
+
+The site is a static export so it can run on GitHub Pages, which has no server.
+For now:
+
+- **Sign-up and sign-in accept anything.** Accounts, the signed-in user and
+  bookings are kept in the visitor's browser (`localStorage`), in
+  `src/lib/local/store.ts`.
+- **Government ID accepts anything**: any number, any file, or none. The number
+  is shown masked on the confirmation; files are not uploaded anywhere.
+- **Payment is always simulated**, and says so on screen.
+- Seats are still checked: a desk booked in this browser shows as booked and
+  can't be taken twice.
+
+The full-stack version (scrypt passwords, signed cookies, private ID uploads,
+Aadhaar checksum, Razorpay orders and signature checks, server-side conflict
+checks) is commit `da4efa8`. To bring it back, restore `src/app/api` and
+`src/lib/server` from that commit, re-add `server-only` and `zod`, and remove
+`output: "export"` from `next.config.ts`.
+
 ## Run it
 
 ```bash
 npm install
-cp .env.example .env.local   # optional in development
-npm run dev                  # http://localhost:3000
+npm run dev      # http://localhost:3000
+npm run build    # static site in out/
 ```
 
-With no Razorpay keys the checkout runs in **demo mode**: the payment sheet says
-so, and no money moves. Add `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` to take
-real payments; nothing else changes.
-
-```bash
-npm run build && npm start   # production; needs SESSION_SECRET
-```
+Every push to `main` builds and deploys to GitHub Pages
+(`.github/workflows/deploy.yml`). The custom domain is a proxied CNAME in
+Cloudflare: `worklushconcepts.pulplabs.ai → akshay-eng.github.io`.
 
 ## Where things live
 
@@ -38,8 +56,7 @@ npm run build && npm start   # production; needs SESSION_SECRET
 | 2D floor plan (SVG) | `src/components/booking/floor-plan-2d.tsx` |
 | 3D walkthrough (three.js / R3F) | `src/components/booking/floor-3d/` |
 | Booking page, space dialog, checkout | `src/components/booking/booking-app.tsx`, `space-dialog.tsx`, `checkout-view.tsx` |
-| API: auth, availability, bookings, payment confirm | `src/app/api/` |
-| Storage (JSON file + private uploads) | `src/lib/server/store.ts` |
+| Browser storage for the preview (accounts, bookings) | `src/lib/local/store.ts` |
 
 The floor is traced from the fire evacuation diagram on site: 22 open desks in
 clusters of 6, 8 and 8, two boss cabins, team cabins for 4, 5, 6, 6 and 7, the
@@ -68,8 +85,8 @@ end of `src/app/globals.css`. Use those rather than one-off sizes.
    `availability.ts` books a deterministic share of seats per day and lets
    Cabin 7 to a "member team", so the floor looks lived-in and the server
    enforces the same seats. Make it return `[]`.
-3. **Move storage to a database.** `store.ts` is a single-process JSON file. For
-   more than one server, put Postgres behind the same functions.
+3. **Bring back the server.** Restore the full-stack version (see above) and put
+   Postgres behind its storage functions.
 4. **ID data.** The full Aadhaar number is validated and never stored; only the
    masked form (`XXXX XXXX 1234`) and a salted hash are kept. Uploaded ID images
    sit in `DATA_DIR/uploads/<booking>/` with owner-only permissions. Under the

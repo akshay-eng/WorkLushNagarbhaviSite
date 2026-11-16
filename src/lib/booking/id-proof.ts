@@ -76,10 +76,11 @@ export function validateId(type: IdType, raw: string): string | null {
 }
 
 export function maskId(type: IdType, raw: string): string {
-  const v = normaliseId(type, raw);
+  const v = raw.replace(/\s+/g, "").toUpperCase();
+  if (v.length <= 4) return v;
   const last4 = v.slice(-4);
   if (type === "aadhaar") return `XXXX XXXX ${last4}`;
-  return `${"•".repeat(Math.max(0, v.length - 4))}${last4}`;
+  return `${"•".repeat(Math.min(8, v.length - 4))}${last4}`;
 }
 
 /** Live formatting while typing an Aadhaar number: 1234 5678 9012. */

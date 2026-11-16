@@ -5,49 +5,19 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, CreditCard, FileText, ImageUp, Lock, ShieldCheck, Smartphone, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { CtaButton } from "@/components/site/cta";
-import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { kindLabel, type Resource } from "@/data/floor";
-import { ID_FILE_MAX_BYTES, ID_FILE_TYPES, ID_TYPES, formatAadhaarInput, maskId, validateId, type IdType } from "@/lib/booking/id-proof";
+import { ID_TYPES, maskId, type IdType } from "@/lib/booking/id-proof";
+import { checkSchedule } from "@/lib/booking/availability";
+import { useAuth } from "@/components/auth/auth-context";
+import { availabilityFor, bookingCode, newBookingId, saveBooking, type LocalBooking } from "@/lib/local/store";
 import { inr, quote, type Schedule } from "@/lib/booking/pricing";
 import { spring } from "@/lib/springs";
 import { cn } from "@/lib/utils";
 import { ChipGroup } from "./chips";
 
-export type ConfirmedBooking = {
-  id: string;
-  code: string;
-  status: string;
-  resource: { id: string; code: string; name: string; kind: string };
-  schedule: Schedule;
-  amount: { subtotal: number; gst: number; total: number };
-  guest: { name: string; email: string; phone: string };
-  idProof: { type: IdType; masked: string };
-  paymentMode: "razorpay" | "demo";
-};
-
-type Payment =
-  | { mode: "demo" }
-  | { mode: "razorpay"; keyId: string; orderId: string; amount: number; currency: string; prefill: { name: string; email: string; contact: string } };
-
-type RazorpayResponse = { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string };
-type RazorpayInstance = { open: () => void };
-declare global {
-  interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => RazorpayInstance;
-  }
-}
-
-function loadRazorpay(): Promise<boolean> {
-  if (window.Razorpay) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const s = document.createElement("script");
-    s.src = "https://checkout.razorpay.com/v1/checkout.js";
-    s.onload = () => resolve(true);
-    s.onerror = () => resolve(false);
-    document.body.appendChild(s);
-  });
-}
+export type ConfirmedBooking = LocalBooking;
 
 /** A numbered checkout section that dims until it's your turn. */
 export function Section({ n, title, done, disabled, summary, children }: { n: number; title: string; done?: boolean; disabled?: boolean; summary?: ReactNode; children?: ReactNode }) {
@@ -120,175 +90,104 @@ export function OrderSummary({ resource, schedule, onEdit, locked }: { resource:
 }
 
 export function CheckoutForm({ resource, schedule, disabled, onBooked }: { resource: Resource; schedule: Schedule; disabled: boolean; onBooked: (b: ConfirmedBooking) => void }) {
+  const { user } = useAuth();
   const q = quote(resource, schedule);
   const [idType, setIdType] = useState<IdType>("aadhaar");
   const [idNumber, setIdNumber] = useState("");
-  const [touched, setTouched] = useState(false);
   const [front, setFront] = useState<File | null>(null);
   const [back, setBack] = useState<File | null>(null);
-  const [consent, setConsent] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [consent, setConsent] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState<{ booking: ConfirmedBooking; payment: Payment } | null>(null);
+  const [pending, setPending] = useState<LocalBooking | null>(null);
   const [demoOpen, setDemoOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const idRef = useRef<HTMLDivElement>(null);
 
   const idMeta = ID_TYPES.find((t) => t.value === idType)!;
-  const idError = touched || idNumber.length >= 8 ? validateId(idType, idNumber) : null;
-  const idOk = idNumber.length > 0 && !validateId(idType, idNumber);
-  const idDone = idOk && !!front && consent;
+  const masked = idNumber.trim() ? maskId(idType, idNumber) : "";
+  const idDone = !!idNumber.trim() || !!front;
 
-  const confirm = async (bookingId: string, body: Record<string, string>) => {
-    const res = await fetch(`/api/bookings/${bookingId}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "We couldn't confirm the payment.");
-    onBooked(data.booking as ConfirmedBooking);
-  };
-
-  const openPayment = async (p: { booking: ConfirmedBooking; payment: Payment }) => {
-    if (p.payment.mode === "demo") {
-      setDemoOpen(true);
-      return;
-    }
-    const ok = await loadRazorpay();
-    if (!ok || !window.Razorpay) {
-      setNotice("The payment window didn't load. Check your connection and try again — your slot is held for 15 minutes.");
-      return;
-    }
-    const pay = p.payment;
-    new window.Razorpay({
-      key: pay.keyId,
-      amount: pay.amount,
-      currency: pay.currency,
-      order_id: pay.orderId,
-      name: "Worklush Spaces",
-      description: `${resource.name} · ${q.when}`,
-      image: "/icon.png",
-      prefill: pay.prefill,
-      theme: { color: "#023c40" },
-      handler: async (r: RazorpayResponse) => {
-        try {
-          setBusy(true);
-          await confirm(p.booking.id, { mode: "razorpay", ...r });
-        } catch (err) {
-          setNotice(err instanceof Error ? err.message : "Payment received but not confirmed. We'll sort it out — call us.");
-        } finally {
-          setBusy(false);
-        }
-      },
-      modal: { ondismiss: () => setNotice("Payment window closed. Your slot is held for 15 minutes — pay whenever you're ready.") },
-    }).open();
-  };
-
+  // Preview build: any ID number and any file are accepted. The seat itself
+  // is still checked, so a taken desk can't be booked twice.
   const submit = async () => {
-    setTouched(true);
-    const next: Record<string, string> = {};
-    const idErr = validateId(idType, idNumber);
-    if (idErr) next.idNumber = idErr;
-    if (!front) next.idFront = "Upload a photo or scan of your ID.";
-    if (!consent) next.consent = "Please agree to ID verification.";
-    setErrors(next);
-    if (Object.keys(next).length) {
-      idRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      idRef.current?.animate([{ transform: "translateX(0)" }, { transform: "translateX(-8px)" }, { transform: "translateX(6px)" }, { transform: "translateX(0)" }], { duration: 320, easing: "ease-in-out" });
-      return;
-    }
     if (pending) {
-      void openPayment(pending);
+      setDemoOpen(true);
       return;
     }
     setBusy(true);
     setNotice(null);
-    try {
-      const fd = new FormData();
-      fd.set("payload", JSON.stringify({ resourceId: resource.id, schedule, idType, idNumber, consent: true }));
-      fd.set("idFront", front!);
-      if (back) fd.set("idBack", back);
-      const res = await fetch("/api/bookings", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrors(data.errors ?? { form: "Something went wrong. Try again." });
-        return;
-      }
-      const p = { booking: data.booking as ConfirmedBooking, payment: data.payment as Payment };
-      setPending(p);
-      await openPayment(p);
-    } catch {
-      setErrors({ form: "You seem to be offline. Nothing was charged. Try again." });
-    } finally {
+    await new Promise((r) => setTimeout(r, 300));
+    const check = checkSchedule(resource, schedule, availabilityFor(schedule.date));
+    if (!check.ok) {
+      setNotice(check.reason);
       setBusy(false);
+      return;
     }
+    const booking: LocalBooking = {
+      id: newBookingId(),
+      code: bookingCode(),
+      status: "pending_payment",
+      userId: user?.id ?? "guest",
+      resource: { id: resource.id, code: resource.code, name: resource.name, kind: resource.kind },
+      schedule,
+      amount: { subtotal: q.subtotal, gst: q.gst, total: q.total },
+      guest: { name: user?.name ?? "Guest", email: user?.email ?? "", phone: user?.phone ?? "" },
+      idProof: { type: idType, masked: masked || "Not provided", files: [front?.name, back?.name].filter((n): n is string => !!n) },
+      paymentMode: "demo",
+      createdAt: new Date().toISOString(),
+    };
+    setPending(booking);
+    setBusy(false);
+    setDemoOpen(true);
   };
 
   return (
     <>
-      <div ref={idRef}>
-        <Section n={2} title="Government ID" disabled={disabled} done={idDone} summary={!disabled && idOk ? <span className="type-small nums hidden text-muted-foreground sm:inline">{maskId(idType, idNumber)}</span> : undefined}>
-          <div className="flex flex-col gap-5">
-            <p className="type-small flex items-start gap-2 text-muted-foreground">
-              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-teal" />
-              Reception checks this against you on arrival. It&apos;s how we keep the floor secure.
-            </p>
-            <ChipGroup
-              label="ID type"
-              layoutId="id-type"
-              columns={5}
-              value={idType}
-              onChange={(t) => {
-                setIdType(t);
-                setIdNumber("");
-                setTouched(false);
-                setErrors((e) => ({ ...e, idNumber: "" }));
-              }}
-              items={ID_TYPES.map((t) => ({ value: t.value, label: t.label.replace(" card", "") }))}
-              className="max-sm:!grid-cols-3"
+      <Section n={2} title="Government ID" disabled={disabled} done={idDone} summary={!disabled && masked ? <span className="type-small nums hidden text-muted-foreground sm:inline">{masked}</span> : undefined}>
+        <div className="flex flex-col gap-5">
+          <p className="type-small flex items-start gap-2 text-muted-foreground">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-teal" />
+            Reception checks this against you on arrival. It&apos;s how we keep the floor secure.
+          </p>
+          <ChipGroup
+            label="ID type"
+            layoutId="id-type"
+            columns={5}
+            value={idType}
+            onChange={setIdType}
+            items={ID_TYPES.map((t) => ({ value: t.value, label: t.label.replace(" card", "") }))}
+            className="max-sm:!grid-cols-3"
+          />
+          <Field>
+            <FieldLabel htmlFor="id-number">{idMeta.label} number</FieldLabel>
+            <Input
+              id="id-number"
+              value={idNumber}
+              onChange={(e) => setIdNumber(e.target.value)}
+              placeholder={idMeta.placeholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="nums h-11 tracking-wider"
             />
-            <Field data-invalid={!!(errors.idNumber || idError) || undefined}>
-              <FieldLabel htmlFor="id-number">{idMeta.label} number</FieldLabel>
-              <Input
-                id="id-number"
-                value={idNumber}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setIdNumber(idType === "aadhaar" ? formatAadhaarInput(v) : v.toUpperCase().replace(/[^A-Z0-9 -]/g, "").slice(0, 18));
-                  if (errors.idNumber) setErrors((x) => ({ ...x, idNumber: "" }));
-                }}
-                onBlur={() => setTouched(true)}
-                placeholder={idMeta.placeholder}
-                inputMode={idType === "aadhaar" ? "numeric" : "text"}
-                autoComplete="off"
-                spellCheck={false}
-                className="nums h-11 tracking-wider"
-                aria-invalid={!!(errors.idNumber || idError) || undefined}
-              />
-              {errors.idNumber || idError ? (
-                <FieldError>{errors.idNumber || idError}</FieldError>
-              ) : idOk ? (
-                <FieldDescription>
-                  <span className="inline-flex items-center gap-1.5 text-teal">
-                    <Lock className="h-3.5 w-3.5" /> We&apos;ll store only <span className="nums">{maskId(idType, idNumber)}</span>
-                  </span>
-                </FieldDescription>
+            <FieldDescription>
+              {masked ? (
+                <span className="inline-flex items-center gap-1.5 text-teal">
+                  <Lock className="h-3.5 w-3.5" /> Shown to reception as <span className="nums">{masked}</span>
+                </span>
               ) : (
-                <FieldDescription>{idMeta.hint}</FieldDescription>
+                idMeta.hint
               )}
-            </Field>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <DropZone label="Front of ID" required file={front} onFile={(f) => { setFront(f); setErrors((x) => ({ ...x, idFront: "" })); }} error={errors.idFront} />
-              <DropZone label="Back of ID" hint={idType === "aadhaar" || idType === "dl" ? "Recommended" : "Optional"} file={back} onFile={(f) => { setBack(f); setErrors((x) => ({ ...x, idBack: "" })); }} error={errors.idBack} />
-            </div>
-            <label className="type-small flex cursor-pointer items-start gap-3 text-foreground">
-              <input type="checkbox" checked={consent} onChange={(e) => { setConsent(e.target.checked); setErrors((x) => ({ ...x, consent: "" })); }} className="mt-0.5 h-5 w-5 shrink-0 accent-[#037e6e]" />
-              <span>
-                I consent to Worklush Spaces keeping a copy of this ID to verify me at the front desk. It&apos;s stored privately, never shared,
-                {idType === "aadhaar" ? " and my Aadhaar number is kept masked to the last four digits." : " and deleted on request."}
-              </span>
-            </label>
-            {errors.consent && <p className="type-small -mt-3 text-destructive">{errors.consent}</p>}
+            </FieldDescription>
+          </Field>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <DropZone label="Front of ID" file={front} onFile={setFront} />
+            <DropZone label="Back of ID" hint="Optional" file={back} onFile={setBack} />
           </div>
-        </Section>
-      </div>
+          <label className="type-small flex cursor-pointer items-start gap-3 text-foreground">
+            <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-5 w-5 shrink-0 accent-[#037e6e]" />
+            <span>I&apos;m happy for Worklush Spaces to check this ID at the front desk.</span>
+          </label>
+        </div>
+      </Section>
 
       <Section n={3} title="Pay" disabled={disabled}>
         <div className="flex flex-col gap-4">
@@ -300,17 +199,17 @@ export function CheckoutForm({ resource, schedule, disabled, onBooked }: { resou
             ))}
           </div>
           <AnimatePresence>
-            {(notice || errors.form) && (
+            {notice && (
               <motion.p initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: spring.fast.exit }} transition={spring.moderate} role="alert" className="type-small rounded-xl bg-[#fdeee6] px-4 py-3 text-[#8a3a12]">
-                {errors.form || notice}
+                {notice}
               </motion.p>
             )}
           </AnimatePresence>
           <CtaButton arrow loading={busy} onClick={submit} className="w-full sm:w-fit sm:min-w-[260px]">
-            {pending ? `Pay ${inr(q.total)}` : `Verify ID and pay ${inr(q.total)}`}
+            Pay {inr(q.total)}
           </CtaButton>
           <p className="type-caption flex items-center gap-1.5 font-normal text-muted-foreground">
-            <Lock className="h-3.5 w-3.5" /> Secure payments by Razorpay. Your slot is held for 15 minutes while you pay.
+            <Lock className="h-3.5 w-3.5" /> Preview build: payment is simulated and your booking is saved in this browser.
           </p>
         </div>
       </Section>
@@ -320,10 +219,16 @@ export function CheckoutForm({ resource, schedule, disabled, onBooked }: { resou
         amount={q.total}
         onClose={() => {
           setDemoOpen(false);
-          setNotice("Payment window closed. Your slot is held for 15 minutes.");
+          setNotice("Payment window closed. Tap Pay whenever you're ready.");
         }}
         onPay={async () => {
-          if (pending) await confirm(pending.booking.id, { mode: "demo" });
+          if (!pending) return;
+          const check = checkSchedule(resource, schedule, availabilityFor(schedule.date));
+          if (!check.ok) throw new Error(check.reason);
+          await new Promise((r) => setTimeout(r, 500));
+          const done: LocalBooking = { ...pending, status: "confirmed" };
+          saveBooking(done);
+          onBooked(done);
         }}
       />
     </>
@@ -331,6 +236,7 @@ export function CheckoutForm({ resource, schedule, disabled, onBooked }: { resou
 }
 
 function DropZone({ label, hint, required, file, onFile, error }: { label: string; hint?: string; required?: boolean; file: File | null; onFile: (f: File | null) => void; error?: string }) {
+  // Preview build: any file is accepted.
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const [local, setLocal] = useState<string | null>(null);
@@ -341,8 +247,6 @@ function DropZone({ label, hint, required, file, onFile, error }: { label: strin
 
   const accept = (f: File | undefined) => {
     if (!f) return;
-    if (!(ID_FILE_TYPES as readonly string[]).includes(f.type)) return setLocal("Use a JPG, PNG, WebP or PDF.");
-    if (f.size > ID_FILE_MAX_BYTES) return setLocal("That file is over 5 MB.");
     setLocal(null);
     onFile(f);
   };
@@ -404,14 +308,13 @@ function DropZone({ label, hint, required, file, onFile, error }: { label: strin
           >
             <ImageUp className={cn("h-6 w-6 transition-transform duration-200", over ? "-translate-y-1 text-teal" : "text-muted-foreground")} />
             <span className="type-small font-semibold text-foreground">Upload or drop here</span>
-            <span className="type-caption font-normal text-muted-foreground">JPG, PNG or PDF · up to 5 MB</span>
+            <span className="type-caption font-normal text-muted-foreground">A photo or a scan</span>
           </motion.button>
         )}
       </AnimatePresence>
       <input
         ref={input}
         type="file"
-        accept="image/jpeg,image/png,image/webp,application/pdf"
         className="sr-only"
         tabIndex={-1}
         onChange={(e) => {
@@ -454,9 +357,7 @@ function DemoPayment({ open, amount, onClose, onPay }: { open: boolean; amount: 
               <div>
                 <span className="type-caption rounded-full bg-ember/15 px-2.5 py-1 text-[#9a3f12]">Demo mode · no money moves</span>
                 <h3 className="type-h3 nums mt-3 text-ink">Pay {inr(amount)}</h3>
-                <p className="type-small mt-1 text-muted-foreground">
-                  Razorpay keys aren&apos;t set on this server, so payment is simulated. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to take real payments.
-                </p>
+                <p className="type-small mt-1 text-muted-foreground">This is a preview of the booking flow. Payment is simulated and nothing is charged; your booking is saved in this browser.</p>
               </div>
               <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="grid h-10 w-10 shrink-0 place-items-center rounded-full hover:bg-hover">
                 <X className="h-4 w-4" />

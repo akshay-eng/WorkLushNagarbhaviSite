@@ -3,7 +3,8 @@
 import { AnimatePresence, motion } from "motion/react";
 import { CheckCircle2, Eye, EyeOff } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
-import { useAuth, type User } from "@/components/auth/auth-context";
+import type { User } from "@/components/auth/auth-context";
+import { loginUser, registerUser } from "@/lib/local/store";
 import { CtaButton } from "@/components/site/cta";
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -134,13 +135,6 @@ function PasswordInput({ id, value, onChange, invalid, autoComplete }: { id: str
   );
 }
 
-function shake(el: HTMLElement | null) {
-  el?.animate(
-    [{ transform: "translateX(0)" }, { transform: "translateX(-8px)" }, { transform: "translateX(6px)" }, { transform: "translateX(-3px)" }, { transform: "translateX(0)" }],
-    { duration: 340, easing: "ease-in-out" }
-  );
-}
-
 function FormError({ children }: { children: React.ReactNode }) {
   return (
     <p className="type-small rounded-xl bg-[#fdeee6] px-3 py-2 text-[#8a3a12]" role="alert">
@@ -161,28 +155,13 @@ function RegisterForm({ onDone }: { onDone: (email: string) => void }) {
   };
   const score = strength(form.password);
 
+  // Preview build: whatever is typed is accepted and kept in this browser.
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!agree) {
-      setErrors({ agree: "Please accept the terms to continue." });
-      shake(ref.current);
-      return;
-    }
     setBusy(true);
-    try {
-      const res = await fetch("/api/auth/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrors(data.errors ?? { form: "Something went wrong. Try again." });
-        shake(ref.current);
-        return;
-      }
-      onDone(data.email);
-    } catch {
-      setErrors({ form: "You seem to be offline. Check your connection and try again." });
-    } finally {
-      setBusy(false);
-    }
+    await new Promise((r) => setTimeout(r, 350));
+    onDone(registerUser(form));
+    setBusy(false);
   };
 
   return (
@@ -261,31 +240,19 @@ function RegisterForm({ onDone }: { onDone: (email: string) => void }) {
 }
 
 function LoginForm({ defaultEmail, onDone }: { defaultEmail: string; onDone: (user: User) => void }) {
-  const { setUser } = useAuth();
   const [email, setEmail] = useState(defaultEmail);
   const [password, setPassword] = useState("");
-  const [errors, setErrors] = useState<Errors>({});
+  const errors: Errors = {};
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLFormElement>(null);
 
+  // Preview build: any email and password signs in.
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    try {
-      const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrors(data.errors ?? { form: "Something went wrong. Try again." });
-        shake(ref.current);
-        return;
-      }
-      setUser(data.user);
-      onDone(data.user);
-    } catch {
-      setErrors({ form: "You seem to be offline. Check your connection and try again." });
-    } finally {
-      setBusy(false);
-    }
+    await new Promise((r) => setTimeout(r, 350));
+    onDone(loginUser(email));
+    setBusy(false);
   };
 
   return (

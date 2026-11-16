@@ -1,57 +1,28 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { currentUser, logoutUser, subscribe, type LocalUser } from "@/lib/local/store";
 
-export type User = { id: string; name: string; email: string; phone: string };
+export type User = LocalUser;
 
 type AuthState = {
   user: User | null;
-  /** True until the first /api/auth/me answer arrives. */
+  /** True until the browser has read the saved session. */
   loading: boolean;
-  setUser: (user: User | null) => void;
-  refresh: () => Promise<void>;
   logout: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
 
-async function fetchMe(): Promise<User | null> {
-  try {
-    const res = await fetch("/api/auth/me", { cache: "no-store" });
-    const data = (await res.json()) as { user: User | null };
-    return data.user;
-  } catch {
-    return null;
-  }
-}
+const hydrated = () => true;
+const notHydrated = () => false;
+const noop = () => () => {};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    setUser(await fetchMe());
-    setLoading(false);
-  }, []);
-
-  const logout = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
-    setUser(null);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    fetchMe().then((u) => {
-      if (!alive) return;
-      setUser(u);
-      setLoading(false);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const value = useMemo(() => ({ user, loading, setUser, refresh, logout }), [user, loading, refresh, logout]);
+  const user = useSyncExternalStore(subscribe, currentUser, () => null);
+  const ready = useSyncExternalStore(noop, hydrated, notHydrated);
+  const logout = useCallback(async () => logoutUser(), []);
+  const value = useMemo(() => ({ user, loading: !ready, logout }), [user, ready, logout]);
   return <AuthContext value={value}>{children}</AuthContext>;
 }
 
